@@ -13,8 +13,10 @@ Plugin that logs queue task status and can send notifications via Apprise.
 - Persistent plugin settings in `settings.json`
 
 ## Discord
+<img width="461" height="343" alt="image" src="https://github.com/user-attachments/assets/edad5b94-d6a5-4295-8d27-8782f61a5378" />
 
 ## Telegram
+<img width="413" height="316" alt="image" src="https://github.com/user-attachments/assets/d1fca704-546c-4767-9174-e866c7819943" />
 
 
 ## Notes
