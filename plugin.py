@@ -81,13 +81,13 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Queue Notifier"
-        self.version = "1.2.2"
+        self.version = "1.2.3"
         self.description = "Logs queue status and sends notifications through Apprise."
         self._wrapped = False
         self._queue_update_wrapped = False
         self._global_queue_ref_update_wrapped = False
         self._process_tasks_wrapped = False
-        self._original_generate_video = None
+        self._original_generation_fn = None
         self._original_update_queue_data = None
         self._original_update_global_queue_ref = None
         self._original_process_tasks = None
@@ -106,6 +106,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         self._sink = self._build_sink()
 
     def setup_ui(self):
+        self.request_global("generate_media")
         self.request_global("generate_video")
         self.request_global("get_gen_info")
         self.request_global("global_queue_ref")
@@ -122,7 +123,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         self._install_process_tasks_wrapper_if_needed()
         self._install_global_queue_ref_wrapper_if_needed()
         self._install_queue_update_wrapper_if_needed()
-        self._install_wrapper_if_needed()
+        self._install_generation_wrapper_if_needed()
         return {}
 
     def create_ui(self):
@@ -418,34 +419,39 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
         return settings
 
-    def _install_wrapper_if_needed(self):
+    def _install_generation_wrapper_if_needed(self):
         if self._wrapped:
             return
 
-        generate_video_fn = getattr(self, "generate_video", None)
-        if not callable(generate_video_fn):
-            self._emit_system_event("generate_video not available; wrapper not installed.")
+        generation_fn_name = "generate_media"
+        generation_fn = getattr(self, generation_fn_name, None)
+        if not callable(generation_fn):
+            generation_fn_name = "generate_video"
+            generation_fn = getattr(self, generation_fn_name, None)
+
+        if not callable(generation_fn):
+            self._emit_system_event("generation function not available; wrapper not installed.")
             return
 
-        if getattr(generate_video_fn, "_wan2gp_notifier_wrapped", False):
+        if getattr(generation_fn, "_wan2gp_notifier_wrapped", False):
             self._wrapped = True
-            self._original_generate_video = getattr(
-                generate_video_fn, "_wan2gp_notifier_original", generate_video_fn
+            self._original_generation_fn = getattr(
+                generation_fn, "_wan2gp_notifier_original", generation_fn
             )
-            self._emit_system_event("generate_video already wrapped.")
+            self._emit_system_event(f"{generation_fn_name} already wrapped.")
             return
 
-        original_fn = generate_video_fn
-        self._original_generate_video = original_fn
+        original_fn = generation_fn
+        self._original_generation_fn = original_fn
 
         @functools.wraps(original_fn)
-        def wrapped_generate_video(task, send_cmd, *args, **kwargs):
+        def wrapped_generation_fn(task, send_cmd, *args, **kwargs):
             state = kwargs.get("state")
             task_id = self._extract_task_id(task)
             prompt_no, prompts_max, queue_len_before = self._read_queue_progress(state)
             progress_alert_handler = self._build_task_progress_alert_handler(task_id, state)
             self._debug_log(
-                "wrapper.generate_video.start",
+                f"wrapper.{generation_fn_name}.start",
                 task_id=task_id,
                 prompt_no=prompt_no,
                 prompts_max=prompts_max,
@@ -475,7 +481,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             except Exception as exc:
                 post_prompt_no, post_prompts_max, _ = self._read_queue_progress(state)
                 self._debug_log(
-                    "wrapper.generate_video.exception",
+                    f"wrapper.{generation_fn_name}.exception",
                     task_id=task_id,
                     error=str(exc),
                     post_prompt_no=post_prompt_no,
@@ -493,7 +499,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
             post_prompt_no, post_prompts_max, _ = self._read_queue_progress(state)
             self._debug_log(
-                "wrapper.generate_video.pre_log",
+                f"wrapper.{generation_fn_name}.pre_log",
                 task_id=task_id,
                 pre_prompt_no=prompt_no,
                 pre_prompts_max=prompts_max,
@@ -509,9 +515,9 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 )
             else:
                 detail = (
-                    "generate_video returned False"
+                    f"{generation_fn_name} returned False"
                     if result is False
-                    else f"generate_video returned {result!r}"
+                    else f"{generation_fn_name} returned {result!r}"
                 )
                 self._log_event(
                     kind="failed",
@@ -522,7 +528,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 )
 
             self._debug_log(
-                "wrapper.generate_video.end",
+                f"wrapper.{generation_fn_name}.end",
                 task_id=task_id,
                 result=result,
                 queue_len_before=queue_len_before,
@@ -533,14 +539,14 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             self._update_progress_window_after_call(queue_len_before)
             return result
 
-        wrapped_generate_video.__signature__ = inspect.signature(original_fn)
-        wrapped_generate_video._wan2gp_notifier_wrapped = True
-        wrapped_generate_video._wan2gp_notifier_original = original_fn
+        wrapped_generation_fn.__signature__ = inspect.signature(original_fn)
+        wrapped_generation_fn._wan2gp_notifier_wrapped = True
+        wrapped_generation_fn._wan2gp_notifier_original = original_fn
 
-        self.set_global("generate_video", wrapped_generate_video)
+        self.set_global(generation_fn_name, wrapped_generation_fn)
         self._wrapped = True
-        self._emit_system_event("generate_video wrapper installed.")
-        self._debug_log("wrapper.generate_video.installed")
+        self._emit_system_event(f"{generation_fn_name} wrapper installed.")
+        self._debug_log(f"wrapper.{generation_fn_name}.installed")
 
     def _install_process_tasks_wrapper_if_needed(self):
         if self._process_tasks_wrapped:

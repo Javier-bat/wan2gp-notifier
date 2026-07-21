@@ -2,6 +2,11 @@
 
 Plugin that logs queue task status and can send notifications via Apprise.
 
+## Compatibility
+
+- Current WanGP builds are monitored through `generate_media`.
+- Older builds that still expose `generate_video` remain supported as a fallback.
+
 ## Features
 
 - Queue completion/failure console logs
