@@ -5,9 +5,11 @@ Plugin that logs queue task status and can send notifications via Apprise.
 ## Features
 
 - Queue completion/failure console logs
+- Per-task percentage alerts during generation (configurable, e.g. every 10%)
 - Apprise notification delivery
 - UI tab (`Notifier`) to:
   - enable/disable notifications
+  - enable/disable percentage alerts and choose alert interval (1-99%)
   - choose provider (`telegram`, `discord`, `whatsapp`, `ifttt`, `google_chat`)
   - save and test notification config
 - Persistent plugin settings in `settings.json`

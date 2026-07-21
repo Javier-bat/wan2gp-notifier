@@ -49,6 +49,10 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
     DEFAULT_SETTINGS = {
         "enabled": True,
+        "percent_alerts": {
+            "enabled": False,
+            "step": 10,
+        },
         "provider": "telegram",
         "providers": {
             "telegram": {
@@ -77,7 +81,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Queue Notifier"
-        self.version = "1.1.0"
+        self.version = "1.2.2"
         self.description = "Logs queue status and sends notifications through Apprise."
         self._wrapped = False
         self._queue_update_wrapped = False
@@ -125,6 +129,9 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         settings = self._get_settings_snapshot()
         provider = settings.get("provider", "telegram")
         providers = settings.get("providers", {})
+        percent_alerts = settings.get("percent_alerts", {})
+        percent_alerts_enabled_value = bool(percent_alerts.get("enabled", False))
+        percent_alerts_step_value = self._normalize_percent_step(percent_alerts.get("step", 10))
 
         telegram_cfg = providers.get("telegram", {})
         discord_cfg = providers.get("discord", {})
@@ -141,6 +148,17 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             enabled_toggle = gr.Checkbox(
                 label="Enable notifications",
                 value=bool(settings.get("enabled", True)),
+            )
+            percent_alerts_toggle = gr.Checkbox(
+                label="Enable progress alerts (per task)",
+                value=percent_alerts_enabled_value,
+            )
+            percent_alerts_step = gr.Slider(
+                minimum=1,
+                maximum=99,
+                step=1,
+                label="Notify every N% progress",
+                value=percent_alerts_step_value,
             )
             provider_selector = gr.Dropdown(
                 choices=self.PROVIDER_CHOICES,
@@ -219,6 +237,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
             all_inputs = [
                 enabled_toggle,
+                percent_alerts_toggle,
+                percent_alerts_step,
                 provider_selector,
                 telegram_bot_token,
                 telegram_chat_id,
@@ -245,18 +265,19 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
             def save_config(*args):
                 new_settings = self._build_settings_from_ui(*args)
-                self._set_settings_snapshot(new_settings, persist=True)
+                persisted = self._set_settings_snapshot(new_settings, persist=True)
                 visible = self._provider_visibility_updates(new_settings.get("provider", "telegram"))
+                feedback = "Configuration saved." if persisted else "Could not save configuration."
                 return (
                     self._build_status_text(new_settings),
                     self._preview_url(new_settings),
-                    "Configuration saved.",
+                    feedback,
                     *visible,
                 )
 
             def send_test(*args):
                 new_settings = self._build_settings_from_ui(*args)
-                self._set_settings_snapshot(new_settings, persist=True)
+                persisted = self._set_settings_snapshot(new_settings, persist=True)
                 ok, msg = self._send_apprise_notification(
                     {
                         "type": "task.success",
@@ -269,7 +290,12 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                     new_settings,
                 )
                 visible = self._provider_visibility_updates(new_settings.get("provider", "telegram"))
-                test_status = "Test sent successfully." if ok else f"Could not send test: {msg}"
+                if ok:
+                    test_status = "Test sent successfully."
+                else:
+                    test_status = f"Could not send test: {msg}"
+                if not persisted:
+                    test_status = f"{test_status} | Could not save configuration."
                 return (
                     self._build_status_text(new_settings),
                     self._preview_url(new_settings),
@@ -281,6 +307,18 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             test_btn.click(fn=send_test, inputs=all_inputs, outputs=all_outputs)
             provider_selector.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
             enabled_toggle.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            percent_alerts_toggle.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            percent_alerts_step.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            telegram_bot_token.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            telegram_chat_id.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            discord_webhook_url.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            whatsapp_token.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            whatsapp_from_phone_id.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            whatsapp_targets.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            ifttt_webhook_id.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            ifttt_events.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            ifttt_query.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            gchat_webhook_url.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
 
         return demo
 
@@ -294,9 +332,45 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             gr.update(visible=provider == "google_chat"),
         )
 
+    def _normalize_percent_step(self, value: Any) -> int:
+        try:
+            normalized = int(value)
+        except Exception:
+            normalized = 10
+        if normalized < 1:
+            return 1
+        if normalized > 99:
+            return 99
+        return normalized
+
+    def _extract_step_total_from_progress_data(self, data: Any):
+        step_value = None
+        total_value = None
+
+        if isinstance(data, (list, tuple)) and len(data) > 0:
+            first = data[0]
+            if isinstance(first, (list, tuple)) and len(first) >= 2:
+                step_value = first[0]
+                total_value = first[1]
+            elif len(data) >= 3:
+                step_value = first
+                total_value = data[2]
+
+        try:
+            step_no = int(step_value)
+            total_no = int(total_value)
+        except Exception:
+            return None, None
+
+        if total_no <= 0 or step_no < 0:
+            return None, None
+        return step_no, total_no
+
     def _build_settings_from_ui(
         self,
         enabled,
+        percent_alerts_enabled,
+        percent_alerts_step,
         provider,
         telegram_bot_token,
         telegram_chat_id,
@@ -311,6 +385,10 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
     ):
         settings = self._get_settings_snapshot()
         settings["enabled"] = bool(enabled)
+        settings["percent_alerts"] = {
+            "enabled": bool(percent_alerts_enabled),
+            "step": self._normalize_percent_step(percent_alerts_step),
+        }
         settings["provider"] = provider if provider in self.PROVIDER_CHOICES else "telegram"
 
         settings["providers"]["telegram"] = {
@@ -365,6 +443,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             state = kwargs.get("state")
             task_id = self._extract_task_id(task)
             prompt_no, prompts_max, queue_len_before = self._read_queue_progress(state)
+            progress_alert_handler = self._build_task_progress_alert_handler(task_id, state)
             self._debug_log(
                 "wrapper.generate_video.start",
                 task_id=task_id,
@@ -377,7 +456,22 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             )
 
             try:
-                result = original_fn(task, send_cmd, *args, **kwargs)
+                def wrapped_send_cmd(*cmd_args, **cmd_kwargs):
+                    cmd = None
+                    data = None
+                    if len(cmd_args) >= 1:
+                        cmd = cmd_args[0]
+                    if len(cmd_args) >= 2:
+                        data = cmd_args[1]
+                    elif "data" in cmd_kwargs:
+                        data = cmd_kwargs.get("data")
+                    try:
+                        progress_alert_handler(cmd, data)
+                    except Exception:
+                        pass
+                    return send_cmd(*cmd_args, **cmd_kwargs)
+
+                result = original_fn(task, wrapped_send_cmd, *args, **kwargs)
             except Exception as exc:
                 post_prompt_no, post_prompts_max, _ = self._read_queue_progress(state)
                 self._debug_log(
@@ -651,7 +745,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 merged[key] = value
         return merged
 
-    def _set_settings_snapshot(self, settings: Dict[str, Any], persist: bool = False):
+    def _set_settings_snapshot(self, settings: Dict[str, Any], persist: bool = False) -> bool:
         with self._settings_lock:
             self._settings = copy.deepcopy(settings)
             if persist:
@@ -660,6 +754,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                         json.dump(self._settings, writer, indent=2, ensure_ascii=True)
                 except Exception as exc:
                     self._emit_system_event(f"Could not save settings.json: {exc}")
+                    return False
+        return True
 
     def _get_settings_snapshot(self):
         with self._settings_lock:
@@ -667,12 +763,17 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
     def _build_status_text(self, settings: Dict[str, Any]) -> str:
         enabled = bool(settings.get("enabled", True))
+        percent_cfg = settings.get("percent_alerts", {})
+        percent_enabled = bool(percent_cfg.get("enabled", False))
+        percent_step = self._normalize_percent_step(percent_cfg.get("step", 10))
+        percent_status = f"Enabled every {percent_step}%" if percent_enabled else "Disabled"
         provider = settings.get("provider", "telegram")
         url_preview = self._preview_url(settings)
         apprise_status = "installed" if self._is_apprise_available() else "not installed"
         status = "Enabled" if enabled else "Disabled"
         return (
             f"**Status:** {status}  \n"
+            f"**Progress Alerts:** {percent_status}  \n"
             f"**Channel:** {provider}  \n"
             f"**Apprise:** {apprise_status}  \n"
             f"**URL (masked):** `{url_preview}`"
@@ -918,6 +1019,46 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             return task.get("id", "unknown")
         return "unknown"
 
+    def _build_task_progress_alert_handler(self, task_id: Any, state: Any):
+        settings = self._get_settings_snapshot()
+        percent_cfg = settings.get("percent_alerts", {})
+        enabled = bool(percent_cfg.get("enabled", False))
+        step = self._normalize_percent_step(percent_cfg.get("step", 10))
+        next_threshold = step
+
+        if not enabled:
+            def noop_handler(cmd: str, data: Any) -> None:
+                return
+
+            return noop_handler
+
+        def handler(cmd: str, data: Any) -> None:
+            nonlocal next_threshold
+            if cmd != "progress" or next_threshold >= 100:
+                return
+
+            step_no, total_no = self._extract_step_total_from_progress_data(data)
+            if step_no is None or total_no is None:
+                return
+
+            percentage = int((float(step_no) * 100.0) / float(total_no))
+            if percentage <= 0:
+                return
+
+            if next_threshold < 100 and percentage >= next_threshold:
+                queue_prompt_no, queue_prompts_max, _ = self._read_queue_progress(state)
+                self._log_event(
+                    kind="progress",
+                    task_id=task_id,
+                    prompt_no=queue_prompt_no,
+                    prompts_max=queue_prompts_max,
+                    details=None,
+                    percentage=next_threshold,
+                )
+                next_threshold += step
+
+        return handler
+
     def _read_queue_progress(self, state):
         queue_len = None
         queue_ref = getattr(self, "global_queue_ref", None)
@@ -1038,6 +1179,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         prompt_no: Optional[int],
         prompts_max: Optional[int],
         details: Optional[str] = None,
+        percentage: Optional[int] = None,
     ) -> Dict[str, Any]:
         progress_text = self._format_progress(prompt_no, prompts_max)
         progress_value = None
@@ -1045,13 +1187,24 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             current = int(prompt_no)
             total = int(prompts_max)
             progress_value = {"current": current, "total": total}
-            if current < total:
+            if kind != "progress" and current < total:
                 progress_value["next_current"] = current + 1
+        if percentage is not None:
+            if progress_value is None:
+                progress_value = {}
+            progress_value["percentage"] = int(percentage)
 
         message_suffix = f": {progress_text}" if progress_text else ""
         task_suffix = f" (task_id={task_id})"
 
-        if kind == "success":
+        if kind == "progress":
+            event_type = "task.progress"
+            pct_text = f"{int(percentage) if percentage is not None else 0}%"
+            if progress_text:
+                message = f"[Notifier] Video progress: {pct_text} | task {progress_text}{task_suffix}"
+            else:
+                message = f"[Notifier] Video progress: {pct_text}{task_suffix}"
+        elif kind == "success":
             event_type = "task.success"
             message = f"[Notifier] Video completed{message_suffix}{task_suffix}"
         elif kind == "error":
@@ -1068,11 +1221,12 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             "timestamp": time.time(),
             "task_id": task_id,
             "progress": progress_value,
+            "percentage": int(percentage) if percentage is not None else None,
             "details": details,
             "message": message,
         }
 
-    def _log_event(self, kind, task_id, prompt_no, prompts_max, details=None):
+    def _log_event(self, kind, task_id, prompt_no, prompts_max, details=None, percentage=None):
         settings = self._get_settings_snapshot()
         if not bool(settings.get("enabled", True)):
             return
@@ -1084,6 +1238,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             prompt_no=prompt_no,
             prompts_max=prompts_max,
             details=details,
+            percentage=percentage,
         )
         event = self._build_task_event(
             kind=kind,
@@ -1091,6 +1246,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             prompt_no=prompt_no,
             prompts_max=prompts_max,
             details=details,
+            percentage=percentage,
         )
         self._emit(event)
 
