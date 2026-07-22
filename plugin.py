@@ -81,16 +81,18 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Queue Notifier"
-        self.version = "1.2.3"
+        self.version = "1.2.5"
         self.description = "Logs queue status and sends notifications through Apprise."
         self._wrapped = False
         self._queue_update_wrapped = False
         self._global_queue_ref_update_wrapped = False
         self._process_tasks_wrapped = False
+        self._record_file_metadata_wrapped = False
         self._original_generation_fn = None
         self._original_update_queue_data = None
         self._original_update_global_queue_ref = None
         self._original_process_tasks = None
+        self._original_record_file_metadata = None
 
         self._settings_lock = threading.Lock()
         self._progress_lock = threading.Lock()
@@ -99,6 +101,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         self._run_total_tasks: Optional[int] = None
         self._completed_tasks_in_run: int = 0
         self._last_known_queue_len: int = 0
+        self._success_notified_task_ids = set()
         self._debug_enabled: bool = False
         self._debug_counter: int = 0
 
@@ -113,6 +116,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         self.request_global("update_queue_data")
         self.request_global("update_global_queue_ref")
         self.request_global("process_tasks")
+        self.request_global("record_file_metadata")
         self.add_tab(
             tab_id="notifier",
             label="Notifier",
@@ -124,6 +128,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         self._install_global_queue_ref_wrapper_if_needed()
         self._install_queue_update_wrapper_if_needed()
         self._install_generation_wrapper_if_needed()
+        self._install_record_file_metadata_wrapper_if_needed()
         return {}
 
     def create_ui(self):
@@ -449,6 +454,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             state = kwargs.get("state")
             task_id = self._extract_task_id(task)
             prompt_no, prompts_max, queue_len_before = self._read_queue_progress(state)
+            output_marker_before = self._read_output_marker(state)
+            notification_sent = False
             progress_alert_handler = self._build_task_progress_alert_handler(task_id, state)
             self._debug_log(
                 f"wrapper.{generation_fn_name}.start",
@@ -456,6 +463,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 prompt_no=prompt_no,
                 prompts_max=prompts_max,
                 queue_len_before=queue_len_before,
+                output_marker_before=output_marker_before,
                 run_total=self._run_total_tasks,
                 completed=self._completed_tasks_in_run,
                 last_known_queue_len=self._last_known_queue_len,
@@ -463,6 +471,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
 
             try:
                 def wrapped_send_cmd(*cmd_args, **cmd_kwargs):
+                    nonlocal notification_sent, output_marker_before
                     cmd = None
                     data = None
                     if len(cmd_args) >= 1:
@@ -475,6 +484,25 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                         progress_alert_handler(cmd, data)
                     except Exception:
                         pass
+                    if cmd == "output" and not notification_sent:
+                        output_marker_after = self._read_output_marker(state)
+                        if self._output_marker_advanced(output_marker_before, output_marker_after):
+                            output_marker_before = output_marker_after
+                            output_prompt_no, output_prompts_max, _ = self._read_queue_progress(state)
+                            self._debug_log(
+                                f"wrapper.{generation_fn_name}.output_success",
+                                task_id=task_id,
+                                output_marker_after=output_marker_after,
+                                prompt_no=output_prompt_no,
+                                prompts_max=output_prompts_max,
+                            )
+                            self._log_success_once(
+                                task_id=task_id,
+                                prompt_no=output_prompt_no,
+                                prompts_max=output_prompts_max,
+                                source=f"{generation_fn_name}.output",
+                            )
+                            notification_sent = True
                     return send_cmd(*cmd_args, **cmd_kwargs)
 
                 result = original_fn(task, wrapped_send_cmd, *args, **kwargs)
@@ -507,11 +535,23 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 post_prompts_max=post_prompts_max,
             )
             if result is True:
-                self._log_event(
-                    kind="success",
+                if notification_sent:
+                    self._debug_log(
+                        f"wrapper.{generation_fn_name}.success_already_sent",
+                        task_id=task_id,
+                    )
+                else:
+                    self._log_success_once(
+                        task_id=task_id,
+                        prompt_no=post_prompt_no,
+                        prompts_max=post_prompts_max,
+                        source=f"{generation_fn_name}.return",
+                    )
+            elif notification_sent:
+                self._debug_log(
+                    f"wrapper.{generation_fn_name}.non_true_after_output_success",
                     task_id=task_id,
-                    prompt_no=post_prompt_no,
-                    prompts_max=post_prompts_max,
+                    result=result,
                 )
             else:
                 detail = (
@@ -547,6 +587,89 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         self._wrapped = True
         self._emit_system_event(f"{generation_fn_name} wrapper installed.")
         self._debug_log(f"wrapper.{generation_fn_name}.installed")
+
+    def _read_output_marker(self, state):
+        gen = None
+        if state is not None:
+            get_gen_info_fn = getattr(self, "get_gen_info", None)
+            if callable(get_gen_info_fn):
+                try:
+                    gen = get_gen_info_fn(state)
+                except Exception:
+                    gen = None
+        if not isinstance(gen, dict):
+            return (0, 0)
+        file_list = gen.get("file_list", [])
+        audio_file_list = gen.get("audio_file_list", [])
+        file_count = len(file_list) if isinstance(file_list, list) else 0
+        audio_count = len(audio_file_list) if isinstance(audio_file_list, list) else 0
+        return (file_count, audio_count)
+
+    def _output_marker_advanced(self, before, after) -> bool:
+        try:
+            return int(after[0]) > int(before[0]) or int(after[1]) > int(before[1])
+        except Exception:
+            return False
+
+    def _install_record_file_metadata_wrapper_if_needed(self):
+        if self._record_file_metadata_wrapped:
+            return
+
+        record_fn = getattr(self, "record_file_metadata", None)
+        if not callable(record_fn):
+            self._emit_system_event("record_file_metadata not available; saved-output wrapper not installed.")
+            return
+
+        if getattr(record_fn, "_wan2gp_notifier_record_wrapped", False):
+            self._record_file_metadata_wrapped = True
+            self._original_record_file_metadata = getattr(
+                record_fn,
+                "_wan2gp_notifier_record_original",
+                record_fn,
+            )
+            self._emit_system_event("record_file_metadata already wrapped.")
+            return
+
+        original_fn = record_fn
+        self._original_record_file_metadata = original_fn
+
+        @functools.wraps(original_fn)
+        def wrapped_record_file_metadata(video_path, configs, is_image, audio_only, gen, *args, **kwargs):
+            result = original_fn(video_path, configs, is_image, audio_only, gen, *args, **kwargs)
+            try:
+                task_id = self._extract_task_id_from_gen(gen)
+                prompt_no = gen.get("prompt_no") if isinstance(gen, dict) else None
+                prompts_max = gen.get("prompts_max") if isinstance(gen, dict) else None
+                self._debug_log(
+                    "wrapper.record_file_metadata.success",
+                    task_id=task_id,
+                    prompt_no=prompt_no,
+                    prompts_max=prompts_max,
+                    is_image=is_image,
+                    audio_only=audio_only,
+                    video_path=video_path,
+                )
+                self._log_success_once(
+                    task_id=task_id,
+                    prompt_no=prompt_no,
+                    prompts_max=prompts_max,
+                    source="record_file_metadata",
+                )
+            except Exception as exc:
+                self._debug_log(
+                    "wrapper.record_file_metadata.notify_error",
+                    error=str(exc),
+                )
+            return result
+
+        wrapped_record_file_metadata.__signature__ = inspect.signature(original_fn)
+        wrapped_record_file_metadata._wan2gp_notifier_record_wrapped = True
+        wrapped_record_file_metadata._wan2gp_notifier_record_original = original_fn
+
+        self.set_global("record_file_metadata", wrapped_record_file_metadata)
+        self._record_file_metadata_wrapped = True
+        self._emit_system_event("record_file_metadata wrapper installed.")
+        self._debug_log("wrapper.record_file_metadata.installed")
 
     def _install_process_tasks_wrapper_if_needed(self):
         if self._process_tasks_wrapped:
@@ -588,6 +711,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 self._last_known_queue_len = queue_len
                 self._run_total_tasks = queue_len if queue_len > 0 else None
                 self._completed_tasks_in_run = 0
+                self._success_notified_task_ids.clear()
                 self._debug_log(
                     "wrapper.process_tasks.start",
                     queue_len=queue_len,
@@ -644,6 +768,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                     if qlen <= 0:
                         self._run_total_tasks = None
                         self._completed_tasks_in_run = 0
+                        self._success_notified_task_ids.clear()
                     self._debug_log(
                         "wrapper.update_queue_data.call",
                         qlen=qlen,
@@ -702,6 +827,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                     if qlen <= 0:
                         self._run_total_tasks = None
                         self._completed_tasks_in_run = 0
+                        self._success_notified_task_ids.clear()
                     self._debug_log(
                         "wrapper.update_global_queue_ref.call",
                         qlen=qlen,
@@ -1024,6 +1150,48 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         if isinstance(task, dict):
             return task.get("id", "unknown")
         return "unknown"
+
+    def _extract_task_id_from_gen(self, gen):
+        if isinstance(gen, dict):
+            queue = gen.get("queue")
+            if isinstance(queue, list) and len(queue) > 0:
+                return self._extract_task_id(queue[0])
+        return "unknown"
+
+    def _success_dedupe_key(self, task_id):
+        if task_id is None:
+            return None
+        key = str(task_id)
+        if not key or key == "unknown":
+            return None
+        return key
+
+    def _log_success_once(self, task_id, prompt_no, prompts_max, source: str):
+        dedupe_key = self._success_dedupe_key(task_id)
+        if dedupe_key is not None:
+            with self._progress_lock:
+                if dedupe_key in self._success_notified_task_ids:
+                    self._debug_log(
+                        "event.success.skipped_duplicate",
+                        task_id=task_id,
+                        source=source,
+                    )
+                    return False
+                self._success_notified_task_ids.add(dedupe_key)
+        self._debug_log(
+            "event.success.emit",
+            task_id=task_id,
+            prompt_no=prompt_no,
+            prompts_max=prompts_max,
+            source=source,
+        )
+        self._log_event(
+            kind="success",
+            task_id=task_id,
+            prompt_no=prompt_no,
+            prompts_max=prompts_max,
+        )
+        return True
 
     def _build_task_progress_alert_handler(self, task_id: Any, state: Any):
         settings = self._get_settings_snapshot()

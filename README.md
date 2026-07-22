@@ -4,7 +4,8 @@ Plugin that logs queue task status and can send notifications via Apprise.
 
 ## Compatibility
 
-- Current WanGP builds are monitored through `generate_media`.
+- Current WanGP builds are monitored through saved output registration.
+- Completion is detected when WanGP records a saved image, video, or audio output, which covers Gradio callbacks captured before plugin wrappers are installed.
 - Older builds that still expose `generate_video` remain supported as a fallback.
 
 ## Features

@@ -1,8 +1,8 @@
 {
   "name": "Queue Notifier",
   "author": "Javier-bat",
-  "version": "1.2.3",
-  "description": "Queue notifier for current WanGP generate_media flow, with task completion/failure and per-task percentage alerts, UI settings, persistent config, and Apprise channels (Telegram/Discord/WhatsApp/IFTTT/Google Chat).",
+  "version": "1.2.5",
+  "description": "Queue notifier for current WanGP saved-output flow, with task completion/failure and per-task percentage alerts, UI settings, persistent config, and Apprise channels (Telegram/Discord/WhatsApp/IFTTT/Google Chat).",
   "date": "",
   "wan2gp_version": ""
 }
