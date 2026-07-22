@@ -11,10 +11,13 @@ Plugin that logs queue task status and can send notifications via Apprise.
 ## Features
 
 - Queue completion/failure console logs
+- Optional generated image/video/audio attachments in completion notifications
+- Telegram uploads use extended Apprise socket timeouts and skip attachments above Telegram Bot API's 50 MB upload limit.
 - Per-task percentage alerts during generation (configurable, e.g. every 10%)
 - Apprise notification delivery
 - UI tab (`Notifier`) to:
   - enable/disable notifications
+  - enable/disable sending generated media files
   - enable/disable percentage alerts and choose alert interval (1-99%)
   - choose provider (`telegram`, `discord`, `whatsapp`, `ifttt`, `google_chat`)
   - save and test notification config
@@ -30,5 +33,6 @@ Plugin that logs queue task status and can send notifications via Apprise.
 ## Notes
 
 - If Apprise is missing, install plugin dependencies (`requirements.txt`) in the app environment.
+- Use `test_send_generation.py` with the WanGP Python environment to test one media upload without generating a new file.
 - This folder is a standalone plugin package. To load it as a local plugin in this repo,
   place it under `plugins/` or install it through the Plugin Manager from a git URL.

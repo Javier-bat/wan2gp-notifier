@@ -53,6 +53,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             "enabled": False,
             "step": 10,
         },
+        "send_generation": False,
         "provider": "telegram",
         "providers": {
             "telegram": {
@@ -81,7 +82,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Queue Notifier"
-        self.version = "1.2.5"
+        self.version = "1.2.8"
         self.description = "Logs queue status and sends notifications through Apprise."
         self._wrapped = False
         self._queue_update_wrapped = False
@@ -138,6 +139,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         percent_alerts = settings.get("percent_alerts", {})
         percent_alerts_enabled_value = bool(percent_alerts.get("enabled", False))
         percent_alerts_step_value = self._normalize_percent_step(percent_alerts.get("step", 10))
+        send_generation_value = bool(settings.get("send_generation", False))
 
         telegram_cfg = providers.get("telegram", {})
         discord_cfg = providers.get("discord", {})
@@ -165,6 +167,10 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 step=1,
                 label="Notify every N% progress",
                 value=percent_alerts_step_value,
+            )
+            send_generation_toggle = gr.Checkbox(
+                label="Send generation",
+                value=send_generation_value,
             )
             provider_selector = gr.Dropdown(
                 choices=self.PROVIDER_CHOICES,
@@ -245,6 +251,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 enabled_toggle,
                 percent_alerts_toggle,
                 percent_alerts_step,
+                send_generation_toggle,
                 provider_selector,
                 telegram_bot_token,
                 telegram_chat_id,
@@ -315,6 +322,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             enabled_toggle.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
             percent_alerts_toggle.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
             percent_alerts_step.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
+            send_generation_toggle.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
             telegram_bot_token.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
             telegram_chat_id.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
             discord_webhook_url.change(fn=save_config, inputs=all_inputs, outputs=all_outputs)
@@ -377,6 +385,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         enabled,
         percent_alerts_enabled,
         percent_alerts_step,
+        send_generation,
         provider,
         telegram_bot_token,
         telegram_chat_id,
@@ -395,6 +404,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             "enabled": bool(percent_alerts_enabled),
             "step": self._normalize_percent_step(percent_alerts_step),
         }
+        settings["send_generation"] = bool(send_generation)
         settings["provider"] = provider if provider in self.PROVIDER_CHOICES else "telegram"
 
         settings["providers"]["telegram"] = {
@@ -501,6 +511,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                                 prompt_no=output_prompt_no,
                                 prompts_max=output_prompts_max,
                                 source=f"{generation_fn_name}.output",
+                                attachments=None,
                             )
                             notification_sent = True
                     return send_cmd(*cmd_args, **cmd_kwargs)
@@ -546,6 +557,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                         prompt_no=post_prompt_no,
                         prompts_max=post_prompts_max,
                         source=f"{generation_fn_name}.return",
+                        attachments=None,
                     )
             elif notification_sent:
                 self._debug_log(
@@ -654,6 +666,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                     prompt_no=prompt_no,
                     prompts_max=prompts_max,
                     source="record_file_metadata",
+                    attachments=video_path,
+                    media_type=self._media_type_from_flags(is_image, audio_only),
                 )
             except Exception as exc:
                 self._debug_log(
@@ -899,6 +913,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         percent_enabled = bool(percent_cfg.get("enabled", False))
         percent_step = self._normalize_percent_step(percent_cfg.get("step", 10))
         percent_status = f"Enabled every {percent_step}%" if percent_enabled else "Disabled"
+        send_generation_status = "Enabled" if bool(settings.get("send_generation", False)) else "Disabled"
         provider = settings.get("provider", "telegram")
         url_preview = self._preview_url(settings)
         apprise_status = "installed" if self._is_apprise_available() else "not installed"
@@ -906,6 +921,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         return (
             f"**Status:** {status}  \n"
             f"**Progress Alerts:** {percent_status}  \n"
+            f"**Send Generation:** {send_generation_status}  \n"
             f"**Channel:** {provider}  \n"
             f"**Apprise:** {apprise_status}  \n"
             f"**URL (masked):** `{url_preview}`"
@@ -1024,6 +1040,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         ok, msg = self._send_apprise_notification(event)
         if not ok:
             self._emit_system_event(f"Apprise did not send message: {msg}")
+        elif msg != "ok":
+            self._emit_system_event(f"Apprise sent message with warning: {msg}")
 
     def _send_apprise_notification(self, event: Dict[str, Any], settings: Optional[Dict[str, Any]] = None):
         settings = settings if settings is not None else self._get_settings_snapshot()
@@ -1046,8 +1064,14 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             return False, "Invalid Apprise URL"
 
         title, body = self._build_apprise_message(event, settings)
-        sent = bool(app.notify(title=title, body=body))
+        attachments = self._event_attachments_for_apprise(event, settings)
+        sent = bool(app.notify(title=title, body=body, attach=attachments if attachments else None))
         if not sent:
+            if attachments:
+                fallback_body = f"{body}\nattachment: failed to send generated file"
+                fallback_sent = bool(app.notify(title=title, body=fallback_body))
+                if fallback_sent:
+                    return True, "Attachment failed; text fallback sent"
             return False, "Apprise returned failure while notifying"
         return True, "ok"
 
@@ -1073,8 +1097,42 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             lines.append(f"next: {next_text}")
         if details:
             lines.append(f"details: {details}")
+        attachments = self._normalize_attachment_paths(event.get("attachments"))
+        if attachments and bool(settings.get("send_generation", False)):
+            names = [os.path.basename(path) for path in attachments]
+            lines.append("files: " + ", ".join(names))
         body = "\n".join(lines)
         return title, body
+
+    def _event_attachments_for_apprise(self, event: Dict[str, Any], settings: Dict[str, Any]):
+        if str(event.get("type", "")) != "task.success":
+            return []
+        if not bool(settings.get("send_generation", False)):
+            return []
+        attachments = self._normalize_attachment_paths(event.get("attachments"))
+        provider = str(settings.get("provider", "") or "").strip().lower()
+        if provider == "telegram":
+            attachments = self._filter_telegram_attachments(attachments)
+        return attachments
+
+    def _filter_telegram_attachments(self, attachments):
+        max_bytes = 50 * 1024 * 1024
+        accepted = []
+        skipped = []
+        for path in attachments:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            if size <= max_bytes:
+                accepted.append(path)
+            else:
+                skipped.append((path, size))
+        for path, size in skipped:
+            self._emit_system_event(
+                f"Telegram attachment skipped because it exceeds 50 MB: {os.path.basename(path)} ({size / (1024 * 1024):.1f} MB)"
+            )
+        return accepted
 
     def _build_apprise_url_for_settings(self, settings: Dict[str, Any]) -> str:
         provider = settings.get("provider", "telegram")
@@ -1100,9 +1158,10 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         if not token:
             return ""
 
+        timeout_query = "?cto=120&rto=300"
         if chat_id:
-            return f"tgram://{token}/{chat_id}/"
-        return f"tgram://{token}/"
+            return f"tgram://{token}/{chat_id}/{timeout_query}"
+        return f"tgram://{token}/{timeout_query}"
 
     def _build_discord_url(self, cfg: Dict[str, Any]) -> str:
         webhook_url = str(cfg.get("webhook_url", "")).strip()
@@ -1166,7 +1225,7 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             return None
         return key
 
-    def _log_success_once(self, task_id, prompt_no, prompts_max, source: str):
+    def _log_success_once(self, task_id, prompt_no, prompts_max, source: str, attachments=None, media_type=None):
         dedupe_key = self._success_dedupe_key(task_id)
         if dedupe_key is not None:
             with self._progress_lock:
@@ -1184,14 +1243,25 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             prompt_no=prompt_no,
             prompts_max=prompts_max,
             source=source,
+            attachments=attachments,
+            media_type=media_type,
         )
         self._log_event(
             kind="success",
             task_id=task_id,
             prompt_no=prompt_no,
             prompts_max=prompts_max,
+            attachments=attachments,
+            media_type=media_type,
         )
         return True
+
+    def _media_type_from_flags(self, is_image, audio_only):
+        if bool(audio_only):
+            return "audio"
+        if bool(is_image):
+            return "image"
+        return "video"
 
     def _build_task_progress_alert_handler(self, task_id: Any, state: Any):
         settings = self._get_settings_snapshot()
@@ -1346,6 +1416,36 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             pass
         return None
 
+    def _format_media_label(self, media_type):
+        media_type = str(media_type or "").strip().lower()
+        if media_type == "image":
+            return "Image"
+        if media_type == "audio":
+            return "Audio"
+        if media_type == "video":
+            return "Video"
+        return "Generation"
+
+    def _normalize_attachment_paths(self, attachments):
+        if attachments is None:
+            return []
+        if isinstance(attachments, (str, os.PathLike)):
+            candidates = [attachments]
+        elif isinstance(attachments, (list, tuple, set)):
+            candidates = list(attachments)
+        else:
+            return []
+
+        paths = []
+        for item in candidates:
+            try:
+                path = os.fspath(item)
+            except Exception:
+                continue
+            if path and os.path.isfile(path):
+                paths.append(path)
+        return paths
+
     def _build_task_event(
         self,
         kind: str,
@@ -1354,6 +1454,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
         prompts_max: Optional[int],
         details: Optional[str] = None,
         percentage: Optional[int] = None,
+        attachments=None,
+        media_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         progress_text = self._format_progress(prompt_no, prompts_max)
         progress_value = None
@@ -1380,7 +1482,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
                 message = f"[Notifier] Video progress: {pct_text}{task_suffix}"
         elif kind == "success":
             event_type = "task.success"
-            message = f"[Notifier] Video completed{message_suffix}{task_suffix}"
+            media_label = self._format_media_label(media_type)
+            message = f"[Notifier] {media_label} completed{message_suffix}{task_suffix}"
         elif kind == "error":
             event_type = "task.error"
             detail_suffix = f" reason={details}" if details else ""
@@ -1397,10 +1500,12 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             "progress": progress_value,
             "percentage": int(percentage) if percentage is not None else None,
             "details": details,
+            "attachments": self._normalize_attachment_paths(attachments),
+            "media_type": media_type,
             "message": message,
         }
 
-    def _log_event(self, kind, task_id, prompt_no, prompts_max, details=None, percentage=None):
+    def _log_event(self, kind, task_id, prompt_no, prompts_max, details=None, percentage=None, attachments=None, media_type=None):
         settings = self._get_settings_snapshot()
         if not bool(settings.get("enabled", True)):
             return
@@ -1413,6 +1518,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             prompts_max=prompts_max,
             details=details,
             percentage=percentage,
+            attachments=attachments,
+            media_type=media_type,
         )
         event = self._build_task_event(
             kind=kind,
@@ -1421,6 +1528,8 @@ class Wan2GPNotifierPlugin(WAN2GPPlugin):
             prompts_max=prompts_max,
             details=details,
             percentage=percentage,
+            attachments=attachments,
+            media_type=media_type,
         )
         self._emit(event)
 
